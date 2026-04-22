@@ -30,12 +30,16 @@ _SKIP_DIRS = frozenset(
 )
 
 # Scope priority (higher = takes precedence)
+# ``preset`` sits between framework and user: bundled alongside the
+# framework distribution, but off by default — capability packs the user
+# opts into per queen/colony rather than globally-enabled infra.
 _SCOPE_PRIORITY = {
     "framework": 0,
-    "user": 1,
-    "queen_ui": 2,
-    "colony_ui": 3,
-    "project": 4,
+    "preset": 1,
+    "user": 2,
+    "queen_ui": 3,
+    "colony_ui": 4,
+    "project": 5,
 }
 
 # Within the same scope, Hive-specific paths override cross-client paths.
@@ -106,12 +110,21 @@ class SkillDiscovery:
         all_skills: list[ParsedSkill] = []
         self._scanned_dirs = []
 
-        # Framework scope (lowest precedence)
+        # Framework scope (lowest precedence) — always-on infra skills.
         if not self._config.skip_framework_scope:
             framework_dir = Path(__file__).parent / "_default_skills"
             if framework_dir.is_dir():
                 self._scanned_dirs.append(framework_dir)
                 all_skills.extend(self._scan_scope(framework_dir, "framework"))
+
+            # Preset scope — bundled capability packs that ship with the
+            # framework but default to OFF. User opts in per queen/colony
+            # via the Skills Library. ``skip_framework_scope`` covers both
+            # bundled directories since they live side-by-side on disk.
+            preset_dir = Path(__file__).parent / "_preset_skills"
+            if preset_dir.is_dir():
+                self._scanned_dirs.append(preset_dir)
+                all_skills.extend(self._scan_scope(preset_dir, "preset"))
 
         # User scope
         if not self._config.skip_user_scope:

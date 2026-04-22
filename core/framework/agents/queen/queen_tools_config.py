@@ -119,13 +119,48 @@ def _migrate_from_profile_if_needed(queen_id: str) -> list[str] | None:
     return enabled
 
 
-def load_queen_tools_config(queen_id: str) -> list[str] | None:
+def tools_config_exists(queen_id: str) -> bool:
+    """Return True when the queen has a persisted ``tools.json`` sidecar.
+
+    Used by callers that need to tell an explicit user save apart from a
+    fallthrough to the role-based default (both can return the same
+    value from ``load_queen_tools_config``).
+    """
+    return tools_config_path(queen_id).exists()
+
+
+def delete_queen_tools_config(queen_id: str) -> bool:
+    """Delete the queen's ``tools.json`` sidecar if present.
+
+    Returns ``True`` if a file was removed, ``False`` if none existed.
+    The next ``load_queen_tools_config`` call falls through to the
+    role-based default (or allow-all for unknown queens).
+    """
+    path = tools_config_path(queen_id)
+    if not path.exists():
+        return False
+    try:
+        path.unlink()
+        return True
+    except OSError:
+        logger.warning("Failed to delete %s", path, exc_info=True)
+        return False
+
+
+def load_queen_tools_config(
+    queen_id: str,
+    mcp_catalog: dict[str, list[dict]] | None = None,
+) -> list[str] | None:
     """Return the queen's MCP tool allowlist, or ``None`` for default-allow.
 
     Order of resolution:
-    1. ``tools.json`` sidecar (authoritative).
+    1. ``tools.json`` sidecar (authoritative; user has saved).
     2. Legacy ``profile.yaml`` field (migrated and deleted on first read).
-    3. ``None`` — default "allow every MCP tool".
+    3. Role-based default from ``queen_tools_defaults`` when the queen
+       is in the known persona table. ``mcp_catalog`` lets the helper
+       expand ``@server:NAME`` shorthands; without it, shorthand entries
+       are dropped.
+    4. ``None`` — default "allow every MCP tool".
     """
     path = tools_config_path(queen_id)
     if path.exists():
@@ -144,7 +179,19 @@ def load_queen_tools_config(queen_id: str) -> list[str] | None:
         logger.warning("Unexpected enabled_mcp_tools shape in %s; ignoring", path)
         return None
 
-    return _migrate_from_profile_if_needed(queen_id)
+    migrated = _migrate_from_profile_if_needed(queen_id)
+    if migrated is not None:
+        return migrated
+    # If migration just hoisted an explicit ``null`` out of profile.yaml,
+    # a sidecar with allow-all semantics now exists on disk. Honor that
+    # over the role default so an explicit user choice wins.
+    if tools_config_path(queen_id).exists():
+        return None
+
+    # No sidecar, nothing to migrate — fall back to role-based default.
+    from framework.agents.queen.queen_tools_defaults import resolve_queen_default_tools
+
+    return resolve_queen_default_tools(queen_id, mcp_catalog)
 
 
 def update_queen_tools_config(

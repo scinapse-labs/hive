@@ -30,7 +30,9 @@ from framework.agents.queen.queen_profiles import (
     load_queen_profile,
 )
 from framework.agents.queen.queen_tools_config import (
+    delete_queen_tools_config,
     load_queen_tools_config,
+    tools_config_exists,
     update_queen_tools_config,
 )
 
@@ -308,12 +310,15 @@ async def handle_get_tools(request: web.Request) -> web.Response:
         lifecycle = _lifecycle_entries_without_session(manager, mcp_tool_names_all)
 
     # Allowlist lives in the dedicated tools.json sidecar; helper
-    # migrates legacy profile.yaml field on first read.
-    enabled_mcp_tools = load_queen_tools_config(queen_id)
+    # migrates legacy profile.yaml field on first read, and falls back
+    # to the role-based default when no sidecar exists.
+    enabled_mcp_tools = load_queen_tools_config(queen_id, mcp_catalog=catalog)
+    is_role_default = not tools_config_exists(queen_id)
 
     response = {
         "queen_id": queen_id,
         "enabled_mcp_tools": enabled_mcp_tools,
+        "is_role_default": is_role_default,
         "stale": stale,
         "lifecycle": lifecycle,
         "synthetic": _synthetic_entries(),
@@ -427,7 +432,75 @@ async def handle_patch_tools(request: web.Request) -> web.Response:
     )
 
 
+async def handle_delete_tools(request: web.Request) -> web.Response:
+    """DELETE /api/queen/{queen_id}/tools — drop the sidecar, fall back to role defaults.
+
+    Users click "Reset to role default" in the Tool Library. That
+    removes ``tools.json`` so the queen's effective allowlist becomes
+    the role-based default (or allow-all if the queen has no role
+    entry). Live sessions are refreshed so the next turn reflects the
+    change without a restart.
+    """
+    queen_id = request.match_info["queen_id"]
+    ensure_default_queens()
+    try:
+        load_queen_profile(queen_id)
+    except FileNotFoundError:
+        return web.json_response({"error": f"Queen '{queen_id}' not found"}, status=404)
+
+    removed = delete_queen_tools_config(queen_id)
+
+    # Recompute the queen's effective allowlist from the role defaults
+    # so we can hot-reload live sessions in one pass (same shape as
+    # PATCH).
+    manager = request.app.get("manager")
+    session = _live_queen_session(manager, queen_id) if manager is not None else None
+    if session is not None:
+        catalog = _catalog_from_live_session(session)
+    else:
+        catalog = await _ensure_manager_catalog(manager)
+    new_enabled = load_queen_tools_config(queen_id, mcp_catalog=catalog)
+
+    refreshed = 0
+    sessions = getattr(manager, "_sessions", None) or {}
+    for sess in sessions.values():
+        if getattr(sess, "queen_name", None) != queen_id:
+            continue
+        phase_state = getattr(sess, "phase_state", None)
+        if phase_state is None:
+            continue
+        phase_state.enabled_mcp_tools = new_enabled
+        rebuild = getattr(phase_state, "rebuild_independent_filter", None)
+        if callable(rebuild):
+            try:
+                rebuild()
+                refreshed += 1
+            except Exception:
+                logger.debug(
+                    "Queen tools: rebuild_independent_filter failed for session %s",
+                    getattr(sess, "id", "?"),
+                    exc_info=True,
+                )
+
+    logger.info(
+        "Queen tools: queen_id=%s reset-to-default removed=%s refreshed_sessions=%d",
+        queen_id,
+        removed,
+        refreshed,
+    )
+    return web.json_response(
+        {
+            "queen_id": queen_id,
+            "removed": removed,
+            "enabled_mcp_tools": new_enabled,
+            "is_role_default": True,
+            "refreshed_sessions": refreshed,
+        }
+    )
+
+
 def register_routes(app: web.Application) -> None:
     """Register queen-tools routes."""
     app.router.add_get("/api/queen/{queen_id}/tools", handle_get_tools)
     app.router.add_patch("/api/queen/{queen_id}/tools", handle_patch_tools)
+    app.router.add_delete("/api/queen/{queen_id}/tools", handle_delete_tools)

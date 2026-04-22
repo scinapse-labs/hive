@@ -32,6 +32,7 @@ type Tab = "queens" | "colonies" | "catalog";
 
 const PROVENANCE_LABEL: Record<SkillProvenance, string> = {
   framework: "Framework",
+  preset: "Preset",
   user_dropped: "User",
   user_ui_created: "User (UI)",
   queen_created: "Queen",
@@ -44,11 +45,13 @@ function ProvenanceBadge({ provenance }: { provenance: SkillProvenance }) {
   const tone =
     provenance === "framework"
       ? "bg-slate-400/10 text-slate-400"
-      : provenance === "queen_created"
-        ? "bg-amber-500/10 text-amber-500"
-        : provenance === "learned_runtime"
-          ? "bg-purple-500/10 text-purple-500"
-          : "bg-primary/10 text-primary";
+      : provenance === "preset"
+        ? "bg-teal-500/10 text-teal-500"
+        : provenance === "queen_created"
+          ? "bg-amber-500/10 text-amber-500"
+          : provenance === "learned_runtime"
+            ? "bg-purple-500/10 text-purple-500"
+            : "bg-primary/10 text-primary";
   return (
     <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tone}`}>
       {PROVENANCE_LABEL[provenance]}

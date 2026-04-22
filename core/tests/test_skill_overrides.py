@@ -199,6 +199,60 @@ class TestSkillsManagerOverrides:
         enabled = {s.name for s in mgr._catalog._skills.values()}  # type: ignore[attr-defined]
         assert "shared-skill" not in enabled
 
+    def test_preset_scope_is_off_by_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Preset-scope skills (bundled capability packs) must stay out
+        of the catalog until the user explicitly opts in."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        fake_presets = tmp_path / "fake_presets"
+        _write_skill_file(fake_presets, "hive.x-automation", "X capability pack")
+        _write_skill_file(fake_presets, "hive.browser-automation", "Browser pack")
+
+        mgr = SkillsManager(
+            SkillsManagerConfig(
+                extra_scope_dirs=[ExtraScope(directory=fake_presets, label="preset", priority=1)],
+                project_root=None,
+                skip_community_discovery=True,
+                interactive=False,
+            )
+        )
+        mgr.load()
+        enabled = {s.name for s in mgr._catalog._skills.values()}  # type: ignore[attr-defined]
+        assert "hive.x-automation" not in enabled
+        assert "hive.browser-automation" not in enabled
+        # Enumeration still surfaces them so the UI can offer a toggle.
+        enumerated = {s.name for s in mgr.enumerate_skills_with_source()}
+        assert "hive.x-automation" in enumerated
+        assert "hive.browser-automation" in enumerated
+
+    def test_preset_skill_enabled_via_explicit_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+        fake_presets = tmp_path / "fake_presets"
+        _write_skill_file(fake_presets, "hive.x-automation")
+
+        overrides_path = tmp_path / "queen_overrides.json"
+        store = SkillOverrideStore.load(overrides_path, scope_label="queen:q")
+        store.upsert(
+            "hive.x-automation",
+            OverrideEntry(enabled=True, provenance=Provenance.PRESET),
+        )
+        store.save()
+
+        mgr = SkillsManager(
+            SkillsManagerConfig(
+                queen_id="q",
+                queen_overrides_path=overrides_path,
+                extra_scope_dirs=[ExtraScope(directory=fake_presets, label="preset", priority=1)],
+                project_root=None,
+                skip_community_discovery=True,
+                interactive=False,
+            )
+        )
+        mgr.load()
+        enabled = {s.name for s in mgr._catalog._skills.values()}  # type: ignore[attr-defined]
+        assert "hive.x-automation" in enabled
+
     def test_reload_picks_up_store_change(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
         fw = tmp_path / "fw"

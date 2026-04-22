@@ -40,6 +40,7 @@ class Provenance(StrEnum):
     """
 
     FRAMEWORK = "framework"
+    PRESET = "preset"
     USER_DROPPED = "user_dropped"
     USER_UI_CREATED = "user_ui_created"
     QUEEN_CREATED = "queen_created"

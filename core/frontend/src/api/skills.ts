@@ -4,6 +4,7 @@ export type SkillScopeKind = "queen" | "colony" | "user";
 
 export type SkillProvenance =
   | "framework"
+  | "preset"
   | "user_dropped"
   | "user_ui_created"
   | "queen_created"

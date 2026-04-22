@@ -31,6 +31,10 @@ export interface McpServerTools {
 export interface QueenToolsResponse {
   queen_id: string;
   enabled_mcp_tools: string[] | null;
+  /** True when the effective allowlist comes from the role-based default
+   * (no tools.json sidecar saved for this queen). False means the user
+   * has explicitly saved an allowlist. */
+  is_role_default: boolean;
   stale: boolean;
   lifecycle: ToolMeta[];
   synthetic: ToolMeta[];
@@ -40,6 +44,14 @@ export interface QueenToolsResponse {
 export interface QueenToolsUpdateResult {
   queen_id: string;
   enabled_mcp_tools: string[] | null;
+  refreshed_sessions: number;
+}
+
+export interface QueenToolsResetResult {
+  queen_id: string;
+  removed: boolean;
+  enabled_mcp_tools: string[] | null;
+  is_role_default: true;
   refreshed_sessions: number;
 }
 
@@ -91,12 +103,17 @@ export const queensApi = {
 
   /** Persist the MCP tool allowlist for a queen.
    *
-   * Pass ``null`` to reset to the default ("allow every MCP tool") or an
-   * explicit list to restrict the queen's tool surface. Lifecycle and
-   * synthetic tools are always enabled and cannot be listed here.
+   * Pass ``null`` to explicitly allow every MCP tool, or a list to
+   * restrict the queen's tool surface. Lifecycle and synthetic tools
+   * are always enabled and cannot be listed here.
    */
   updateTools: (queenId: string, enabled: string[] | null) =>
     api.patch<QueenToolsUpdateResult>(`/queen/${queenId}/tools`, {
       enabled_mcp_tools: enabled,
     }),
+
+  /** Drop the queen's tools.json sidecar so she falls back to the
+   * role-based default (or allow-all for queens without a role entry). */
+  resetTools: (queenId: string) =>
+    api.delete<QueenToolsResetResult>(`/queen/${queenId}/tools`),
 };

@@ -17,6 +17,9 @@ export interface ToolsSnapshot {
   lifecycle: ToolMeta[];
   synthetic: ToolMeta[];
   mcp_servers: McpServerTools[];
+  /** Optional: when true, the allowlist came from the role-based
+   * default (no explicit save). Only queens surface this today. */
+  is_role_default?: boolean;
 }
 
 export interface ToolsEditorProps {
@@ -28,10 +31,14 @@ export interface ToolsEditorProps {
   caveat?: string;
   /** Load the current snapshot. */
   fetchSnapshot: () => Promise<ToolsSnapshot>;
-  /** Persist an allowlist. ``null`` resets to "allow all". */
+  /** Persist an allowlist. ``null`` is an explicit "allow all" save. */
   saveAllowlist: (
     enabled: string[] | null,
   ) => Promise<{ enabled_mcp_tools: string[] | null }>;
+  /** Optional: drop any saved allowlist so the subject falls back to
+   * its role-based default. Shows a "Reset to role default" button
+   * when provided. */
+  resetToRoleDefault?: () => Promise<{ enabled_mcp_tools: string[] | null }>;
 }
 
 type TriState = "checked" | "unchecked" | "indeterminate";
@@ -165,6 +172,7 @@ export default function ToolsEditor({
   caveat,
   fetchSnapshot,
   saveAllowlist,
+  resetToRoleDefault,
 }: ToolsEditorProps) {
   const [data, setData] = useState<ToolsSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -241,7 +249,41 @@ export default function ToolsEditor({
     });
   };
 
-  const handleResetToDefault = () => setDraftAllowed(null);
+  const handleDraftAllowAll = () => setDraftAllowed(null);
+
+  const handleResetToRoleDefault = async () => {
+    if (!resetToRoleDefault) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const result = await resetToRoleDefault();
+      const updated = result.enabled_mcp_tools;
+      baselineRef.current = updated === null ? null : new Set(updated);
+      setDraftAllowed(updated === null ? null : new Set(updated));
+      if (data) {
+        const u = updated === null ? null : new Set(updated);
+        setData({
+          ...data,
+          enabled_mcp_tools: updated,
+          is_role_default: true,
+          mcp_servers: data.mcp_servers.map((srv) => ({
+            ...srv,
+            tools: srv.tools.map((t) => ({
+              ...t,
+              enabled: u === null ? true : u.has(t.name),
+            })),
+          })),
+        });
+      }
+      setSavedRecently(true);
+      setTimeout(() => setSavedRecently(false), 2500);
+    } catch (e: unknown) {
+      const err = e as { body?: { error?: string } };
+      setSaveError(err.body?.error || "Reset failed");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const handleCancel = () => {
     const baseline = baselineRef.current;
@@ -264,6 +306,7 @@ export default function ToolsEditor({
         setData({
           ...data,
           enabled_mcp_tools: updated,
+          is_role_default: false,
           mcp_servers: data.mcp_servers.map((srv) => ({
             ...srv,
             tools: srv.tools.map((t) => ({
@@ -439,15 +482,43 @@ export default function ToolsEditor({
             <Check className="w-3 h-3" /> Saved
           </span>
         )}
-        {draftAllowed !== null && (
-          <button
-            onClick={handleResetToDefault}
-            disabled={saving}
-            className="ml-auto text-[11px] text-muted-foreground hover:text-foreground underline underline-offset-2 disabled:opacity-50"
-          >
-            Reset to default (allow all)
-          </button>
-        )}
+        <div className="ml-auto flex items-center gap-3">
+          {data.is_role_default !== undefined && (
+            <span
+              className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ${
+                data.is_role_default
+                  ? "bg-muted/40 text-muted-foreground"
+                  : "bg-primary/15 text-primary"
+              }`}
+              title={
+                data.is_role_default
+                  ? "Using the default allowlist for this role."
+                  : "Custom allowlist saved by you."
+              }
+            >
+              {data.is_role_default ? "Role default" : "Custom"}
+            </span>
+          )}
+          {resetToRoleDefault && !data.is_role_default && (
+            <button
+              onClick={handleResetToRoleDefault}
+              disabled={saving}
+              className="text-[11px] text-muted-foreground hover:text-foreground underline underline-offset-2 disabled:opacity-50"
+            >
+              Reset to role default
+            </button>
+          )}
+          {draftAllowed !== null && (
+            <button
+              onClick={handleDraftAllowAll}
+              disabled={saving}
+              className="text-[11px] text-muted-foreground hover:text-foreground underline underline-offset-2 disabled:opacity-50"
+              title="Draft 'allow all' — click Save to persist."
+            >
+              Allow all
+            </button>
+          )}
+        </div>
       </div>
 
       {saveError && (

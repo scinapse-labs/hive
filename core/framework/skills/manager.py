@@ -246,18 +246,18 @@ class SkillsManager:
     ) -> list:
         """Filter ``discovered`` per the queen + colony override stores.
 
-        Resolution rule (mirrors the plan's schema):
+        Resolution rule:
           1. Tombstoned names (``deleted_ui_skills``) drop out.
           2. An explicit ``enabled=False`` override drops the skill.
           3. An explicit ``enabled=True`` override keeps it (wins over
-             ``all_defaults_disabled`` for framework defaults).
-          4. Otherwise the skill inherits :meth:`SkillsConfig.is_default_enabled`.
+             ``all_defaults_disabled`` for framework defaults AND over the
+             preset-scope default-off rule).
+          4. Otherwise: preset-scope skills are off by default; everything
+             else inherits :meth:`SkillsConfig.is_default_enabled`.
         """
         from framework.skills.overrides import SkillOverrideStore
 
         stores: list[SkillOverrideStore] = [s for s in (queen_store, colony_store) if s is not None]
-        if not stores:
-            return discovered
 
         tombstones: set[str] = set()
         for store in stores:
@@ -281,6 +281,12 @@ class SkillsManager:
                 continue
             if explicit is True:
                 out.append(skill)
+                continue
+            # Preset-scope capability packs are bundled but ship OFF; the
+            # user must explicitly enable them per queen or colony. This
+            # runs even when no store is present so bare agents don't
+            # silently load x-automation etc.
+            if skill.source_scope == "preset":
                 continue
             # No explicit entry — master switch takes effect against framework defaults.
             default_enabled = skills_config.is_default_enabled(skill.name)

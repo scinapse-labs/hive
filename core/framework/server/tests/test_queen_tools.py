@@ -148,11 +148,18 @@ async def _make_app(*, manager: _FakeManager) -> web.Application:
 
 
 @pytest.mark.asyncio
-async def test_get_tools_default_allows_everything(queen_dir, monkeypatch):
-    # Skip ensure_default_queens; our tmp profile is enough.
+async def test_get_tools_default_allows_everything_for_unknown_queen(queen_dir, monkeypatch):
+    """Queens NOT in the role-default table fall back to allow-all."""
     monkeypatch.setattr(routes_queen_tools, "ensure_default_queens", lambda: None)
 
-    _, queen_id = queen_dir
+    queens_dir, _ = queen_dir
+    # Use a queen id that isn't in QUEEN_DEFAULT_CATEGORIES so we exercise
+    # the fallback-to-allow-all path.
+    custom_id = "queen_custom_unknown"
+    (queens_dir / custom_id).mkdir()
+    (queens_dir / custom_id / "profile.yaml").write_text(
+        yaml.safe_dump({"name": "Custom", "title": "Custom Role"})
+    )
 
     manager = _FakeManager()
     manager._mcp_tool_catalog = {
@@ -164,17 +171,75 @@ async def test_get_tools_default_allows_everything(queen_dir, monkeypatch):
 
     app = await _make_app(manager=manager)
     async with TestClient(TestServer(app)) as client:
-        resp = await client.get(f"/api/queen/{queen_id}/tools")
+        resp = await client.get(f"/api/queen/{custom_id}/tools")
         assert resp.status == 200
         body = await resp.json()
 
     assert body["enabled_mcp_tools"] is None
+    assert body["is_role_default"] is True  # no sidecar → default-allow
     assert body["stale"] is False
     servers = {s["name"]: s for s in body["mcp_servers"]}
     assert set(servers) == {"coder-tools"}
-    # Default-allow → every tool reports enabled=True
     for tool in servers["coder-tools"]["tools"]:
         assert tool["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_tools_applies_role_default(queen_dir, monkeypatch):
+    """Known persona queens get their role-based default allowlist."""
+    monkeypatch.setattr(routes_queen_tools, "ensure_default_queens", lambda: None)
+    _, queen_id = queen_dir  # queen_technology — has a role default
+
+    manager = _FakeManager()
+    # Seed a catalog covering tools the role default references so the
+    # response reflects what the queen would actually see on boot.
+    manager._mcp_tool_catalog = {
+        "coder-tools": [
+            {"name": "read_file", "description": "", "input_schema": {}},
+            {"name": "port_scan", "description": "", "input_schema": {}},  # security
+            {"name": "excel_read", "description": "", "input_schema": {}},  # data
+            {"name": "fluffy_unknown_tool", "description": "", "input_schema": {}},
+        ],
+    }
+
+    app = await _make_app(manager=manager)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get(f"/api/queen/{queen_id}/tools")
+        assert resp.status == 200
+        body = await resp.json()
+
+    # queen_technology's role default includes file_read, data, security, etc.
+    assert body["is_role_default"] is True
+    enabled = set(body["enabled_mcp_tools"] or [])
+    assert "read_file" in enabled
+    assert "port_scan" in enabled  # technology role includes security
+    assert "excel_read" in enabled
+    # Tools not in any category (and not in a @server: expansion target
+    # the role references) are NOT part of the default.
+    assert "fluffy_unknown_tool" not in enabled
+
+
+def test_resolve_queen_default_tools_expands_server_shorthand():
+    """@server:NAME shorthand expands against the provided catalog."""
+    from framework.agents.queen.queen_tools_defaults import resolve_queen_default_tools
+
+    catalog = {
+        "gcu-tools": [
+            {"name": "browser_navigate"},
+            {"name": "browser_click"},
+        ],
+    }
+    # queen_brand_design uses "browser" category → expands via @server:gcu-tools.
+    result = resolve_queen_default_tools("queen_brand_design", catalog)
+    assert result is not None
+    assert "browser_navigate" in result
+    assert "browser_click" in result
+
+
+def test_resolve_queen_default_tools_unknown_queen_returns_none():
+    from framework.agents.queen.queen_tools_defaults import resolve_queen_default_tools
+
+    assert resolve_queen_default_tools("queen_made_up", {}) is None
 
 
 @pytest.mark.asyncio
@@ -214,6 +279,7 @@ async def test_patch_persists_and_validates(queen_dir, monkeypatch):
         # GET reflects the new state
         resp = await client.get(f"/api/queen/{queen_id}/tools")
         body = await resp.json()
+        assert body["is_role_default"] is False  # user has explicitly saved
         servers = {t["name"]: t for t in body["mcp_servers"][0]["tools"]}
         assert servers["read_file"]["enabled"] is True
         assert servers["write_file"]["enabled"] is False
@@ -304,6 +370,55 @@ async def test_missing_queen_returns_404(queen_dir, monkeypatch):
             json={"enabled_mcp_tools": None},
         )
         assert resp.status == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_restores_role_default(queen_dir, monkeypatch):
+    """DELETE removes tools.json so the queen falls back to the role default."""
+    monkeypatch.setattr(routes_queen_tools, "ensure_default_queens", lambda: None)
+    queens_dir, queen_id = queen_dir
+    tools_path = queens_dir / queen_id / "tools.json"
+
+    manager = _FakeManager()
+    manager._mcp_tool_catalog = {
+        "coder-tools": [
+            {"name": "read_file", "description": "", "input_schema": {}},
+            {"name": "port_scan", "description": "", "input_schema": {}},
+        ],
+    }
+
+    app = await _make_app(manager=manager)
+    async with TestClient(TestServer(app)) as client:
+        # Seed a custom allowlist first so we have a sidecar to delete.
+        resp = await client.patch(
+            f"/api/queen/{queen_id}/tools",
+            json={"enabled_mcp_tools": ["read_file"]},
+        )
+        assert resp.status == 200
+        assert tools_path.exists()
+
+        resp = await client.delete(f"/api/queen/{queen_id}/tools")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["removed"] is True
+        assert body["is_role_default"] is True
+        assert not tools_path.exists()
+
+        # The new effective list is the role default for queen_technology,
+        # which includes both read_file (file_read) and port_scan (security).
+        enabled = set(body["enabled_mcp_tools"] or [])
+        assert "read_file" in enabled
+        assert "port_scan" in enabled
+
+        # GET confirms.
+        resp = await client.get(f"/api/queen/{queen_id}/tools")
+        body = await resp.json()
+        assert body["is_role_default"] is True
+
+        # Deleting again is a no-op.
+        resp = await client.delete(f"/api/queen/{queen_id}/tools")
+        assert resp.status == 200
+        assert (await resp.json())["removed"] is False
 
 
 def test_legacy_profile_field_migrates_to_sidecar(queen_dir):

@@ -11,12 +11,17 @@ export default function QueenToolsSection({ queenId }: { queenId: string }) {
     (enabled: string[] | null) => queensApi.updateTools(queenId, enabled),
     [queenId],
   );
+  const resetToRoleDefault = useCallback(
+    () => queensApi.resetTools(queenId),
+    [queenId],
+  );
   return (
     <ToolsEditor
       subjectKey={`queen:${queenId}`}
       title="Tools"
       fetchSnapshot={fetchSnapshot}
       saveAllowlist={saveAllowlist}
+      resetToRoleDefault={resetToRoleDefault}
     />
   );
 }

@@ -95,6 +95,28 @@ def _ensure_queens_known() -> None:
         logger.debug("ensure_default_queens failed (non-fatal)", exc_info=True)
 
 
+class _ManagerReloadAdapter:
+    """Makes a bare ``SkillsManager`` look like a runtime to ``_reload_scope``.
+
+    ``_reload_scope`` calls ``await rt.reload_skills()`` on every entry in
+    ``affected_runtimes``. Live queen DM sessions expose their manager on
+    ``phase_state.skills_manager`` but don't have a runtime wrapper, so
+    we provide this thin shim so PATCHes reach them with the same call.
+    """
+
+    def __init__(self, skills_manager: SkillsManager) -> None:
+        self._mgr = skills_manager
+
+    @property
+    def skills_manager(self) -> SkillsManager:
+        return self._mgr
+
+    async def reload_skills(self) -> dict[str, Any]:
+        async with self._mgr.mutation_lock:
+            self._mgr.reload()
+        return {"catalog_chars": len(self._mgr.skills_catalog_prompt)}
+
+
 def _queen_scope(manager: Any, queen_id: str) -> SkillScope | None:
     _ensure_queens_known()
     queen_home = QUEENS_DIR / queen_id
@@ -106,26 +128,29 @@ def _queen_scope(manager: Any, queen_id: str) -> SkillScope | None:
     store = SkillOverrideStore.load(overrides_path, scope_label=f"queen:{queen_id}")
     write_dir = queen_home / "skills"
 
-    # Prefer a live manager so reload after mutation reaches running
-    # sessions. Any queen-session manager is equivalent since queen-scope
-    # skills cascade identically to every session.
+    # Always build a fresh admin manager for GET so enumeration reflects
+    # the current disk state (including newly-installed preset skills).
+    # The live queen-session manager caches ``_all_skills`` at load time
+    # and only refreshes on explicit reload or file-watch event — reusing
+    # it here means newly-bundled skills stay invisible until a restart.
+    admin_manager = _build_admin_manager(queen_id=queen_id)
+
     runtimes: list = []
-    live_manager: SkillsManager | None = None
     try:
-        for session in manager.iter_queen_sessions(queen_id):  # type: ignore[union-attr]
-            phase_state = getattr(session, "phase_state", None)
-            if phase_state is not None:
-                skills_mgr = getattr(phase_state, "skills_manager", None)
-                if isinstance(skills_mgr, SkillsManager) and live_manager is None:
-                    live_manager = skills_mgr
-        # Colonies owned by this queen also need reload when queen-scope toggles.
         for colony in manager.iter_colony_runtimes(queen_id=queen_id):  # type: ignore[union-attr]
             runtimes.append(colony)
+        # Also collect live DM-session managers as reload targets so a
+        # PATCH reaches running queens, even though we enumerate from
+        # the admin manager.
+        for session in manager.iter_queen_sessions(queen_id):  # type: ignore[union-attr]
+            phase_state = getattr(session, "phase_state", None)
+            if phase_state is None:
+                continue
+            skills_mgr = getattr(phase_state, "skills_manager", None)
+            if isinstance(skills_mgr, SkillsManager):
+                runtimes.append(_ManagerReloadAdapter(skills_mgr))
     except Exception:
         logger.debug("queen scope: live manager lookup failed", exc_info=True)
-
-    if live_manager is None:
-        live_manager = _build_admin_manager(queen_id=queen_id)
 
     return SkillScope(
         kind="queen",
@@ -134,7 +159,7 @@ def _queen_scope(manager: Any, queen_id: str) -> SkillScope | None:
         overrides_path=overrides_path,
         store=store,
         affected_runtimes=runtimes,
-        manager=live_manager,
+        manager=admin_manager,
     )
 
 
@@ -157,19 +182,14 @@ def _colony_scope(manager: Any, colony_name: str) -> SkillScope | None:
     store = SkillOverrideStore.load(overrides_path, scope_label=f"colony:{colony_name}")
     write_dir = colony_home / ".hive" / "skills"
 
+    admin_manager = _build_admin_manager(queen_id=queen_id, colony_name=colony_name)
+
     runtimes: list = []
-    live_manager: SkillsManager | None = None
     try:
         for colony in manager.iter_colony_runtimes(colony_name=colony_name):  # type: ignore[union-attr]
             runtimes.append(colony)
-            skills_mgr = getattr(colony, "skills_manager", None)
-            if isinstance(skills_mgr, SkillsManager) and live_manager is None:
-                live_manager = skills_mgr
     except Exception:
         logger.debug("colony scope: live manager lookup failed", exc_info=True)
-
-    if live_manager is None:
-        live_manager = _build_admin_manager(queen_id=queen_id, colony_name=colony_name)
 
     return SkillScope(
         kind="colony",
@@ -178,7 +198,7 @@ def _colony_scope(manager: Any, colony_name: str) -> SkillScope | None:
         overrides_path=overrides_path,
         store=store,
         affected_runtimes=runtimes,
-        manager=live_manager,
+        manager=admin_manager,
     )
 
 
@@ -260,7 +280,10 @@ def _resolve_provenance(
         if entry is not None:
             store_entry = entry
             stamped = entry.provenance
-            if stamped == Provenance.FRAMEWORK and skill.source_scope != "framework":
+            # Heal a FRAMEWORK stamp that doesn't match the actual scope —
+            # preset/user/colony skills got stamped FRAMEWORK by the old
+            # PATCH default. Leave a legit framework-scoped skill alone.
+            if stamped == Provenance.FRAMEWORK and skill.source_scope not in {"framework"}:
                 stamped = Provenance.OTHER
             if stamped != Provenance.OTHER:
                 return stamped, entry
@@ -270,6 +293,8 @@ def _resolve_provenance(
     # always stamps USER_UI_CREATED.
     if skill.source_scope == "framework":
         return Provenance.FRAMEWORK, store_entry
+    if skill.source_scope == "preset":
+        return Provenance.PRESET, store_entry
     if skill.source_scope == "user":
         return Provenance.USER_DROPPED, store_entry
     if skill.source_scope == "queen_ui":

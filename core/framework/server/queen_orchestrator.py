@@ -558,7 +558,16 @@ async def create_queen(
     # on first read, so existing installs upgrade silently.
     from framework.agents.queen.queen_tools_config import load_queen_tools_config
 
-    phase_state.enabled_mcp_tools = load_queen_tools_config(queen_dir.name)
+    # Build a minimal catalog for default-tool resolution. The full
+    # ``session_manager._mcp_tool_catalog`` snapshot is written further
+    # down the flow; a queen booted for the first time needs the catalog
+    # now so ``@server:NAME`` shorthands in the role-default table can
+    # expand against the just-loaded MCP servers.
+    _boot_catalog: dict[str, list[dict]] = {
+        srv: [{"name": name} for name in sorted(names)]
+        for srv, names in mcp_server_tools_map.items()
+    }
+    phase_state.enabled_mcp_tools = load_queen_tools_config(queen_dir.name, _boot_catalog)
     phase_state.rebuild_independent_filter()
     if phase_state.enabled_mcp_tools is not None:
         total_mcp = len(phase_state.mcp_tool_names_all)

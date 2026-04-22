@@ -327,8 +327,9 @@ class TrustGate:
         import os
 
         # UI-authored scopes bypass the trust gate — they're implicitly
-        # trusted because the user authored them through the UI.
-        _bypass_scopes = {"framework", "user", "queen_ui", "colony_ui"}
+        # trusted because the user authored them through the UI. ``preset``
+        # ships with the framework distribution, so it's trusted too.
+        _bypass_scopes = {"framework", "preset", "user", "queen_ui", "colony_ui"}
         always_trusted = [s for s in skills if s.source_scope in _bypass_scopes]
         project_skills = [s for s in skills if s.source_scope == "project"]
 
